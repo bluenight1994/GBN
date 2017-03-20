@@ -50,11 +50,10 @@ typedef struct {
 } __attribute__((packed)) gbnhdr;
 
 typedef struct state_t{
-	int state;
-	int seq_num;
-	int role;
-	/* TODO: Your state information could be encoded here. */
-
+	int state;                /* state (e.g. CLOSED, SYN_SENT, ...)  */
+	int seq_num;              /* seq number of the packet            */
+	int role;                 /* 0: receiver   1: sender             */
+	int mode;                 /* 0: slow       1: slow               */
 } state_t;
 
 enum {

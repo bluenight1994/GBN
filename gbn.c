@@ -2,7 +2,7 @@
 
 state_t s;
 extern struct sockaddr_in remote;
-extern socklen_t ml, rl;
+extern socklen_t rl;
 
 uint16_t checksum(uint16_t *buf, int nwords)
 {
@@ -17,27 +17,19 @@ uint16_t checksum(uint16_t *buf, int nwords)
 
 ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags){
 	
-	/* TODO: Your code here. */
-
-	/* Hint: Check the data length field 'len'.
-	 *       If it is > DATALEN, you will have to split the data
-	 *       up into multiple packets - you don't have to worry
-	 *       about getting more than N * DATALEN.
-	 */
-
 	int n_seg = ceil(len / (double)DATALEN), send_bytes = 0;
 
 	int i = 0;
 	printf("n_seg: %d\n", n_seg);
-	for (i = 0; i < n_seg; i++) {
 
+	for (i = 0; i < n_seg; i++) {
 		gbnhdr t_hdr;
 		t_hdr.type = DATA;
-		t_hdr.seqnum = s.seq_num + 1;
+		t_hdr.seqnum = s.seq_num;
 		t_hdr.checksum = 0;
 		t_hdr.datalen = min(len, DATALEN);
 		memcpy(t_hdr.data, buf + i * DATALEN, min(len, DATALEN));
-		printf("client send data: %s\n", t_hdr.data);
+		//printf("client send data: %s\n", t_hdr.data);
 		int t_sum = checksum((uint16_t *) &t_hdr, sizeof(t_hdr) / 2);
 		t_hdr.checksum = t_sum;
 
@@ -46,6 +38,8 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags){
 		if (t_send_ret < 0) {
 			return -1;
 		}
+		/* set time out for receiving DATA ACK */
+
 		gbnhdr tmp;
 		int t_ret;
 		t_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, (struct sockaddr *) &remote, &rl);
@@ -63,13 +57,12 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags){
 
 ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags){
 
-	/* TODO: Your code here. */
 	printf("server start to receive\n");
 	gbnhdr tmp;
 	socklen_t tt = sizeof(struct sockaddr);
 	ssize_t t_recv_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, (struct sockaddr *)&remote, &tt);
 	rl = tt;
-	printf("server receiver %d\n", t_recv_ret);
+	printf("server receiver %zd\n", t_recv_ret);
 	if (t_recv_ret < 0) {
 		return -1;
 	}
@@ -79,12 +72,12 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags){
 		printf("data length: %d\n", tmp.datalen);
 		memcpy(buf, tmp.data, tmp.datalen);
 		s.seq_num = tmp.seqnum;
+		memcpy(buf, tmp.data, tmp.datalen);
 
 		gbnhdr t_hdr;
 		t_hdr.type = DATAACK;
 		t_hdr.seqnum = s.seq_num;
 		t_hdr.checksum = 0;
-		memcpy(buf, tmp.data, tmp.datalen);
 		int t_send_ret;
 		t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, (struct sockaddr *)&remote, rl);
 		if (t_send_ret < 0) {
@@ -106,7 +99,6 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags){
 
 int gbn_close(int sockfd){
 
-	/* TODO: Your code here. */
 	if (s.role == 1) {
 		gbnhdr t_hdr;
 		t_hdr.type = FIN;
@@ -118,98 +110,120 @@ int gbn_close(int sockfd){
 	}
 }
 
+static void alarmHandler(int signo) {
+	printf("timeout\n");
+	return;
+}
+
 int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen){
 
-	/* TODO: Your code here. */
 	s.role = 1;
+	s.seq_num = 0;
 
 	memcpy(&remote, server, socklen);
 	rl = socklen;
 
-	printf("client try to connect server\n");
-	gbnhdr t_hdr;
-	t_hdr.type = SYN;
-	t_hdr.seqnum = s.seq_num;
-	t_hdr.checksum = 0;
-	int t_send_ret;
-	t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, server, socklen);
-	if (t_send_ret < 0) {
-		printf("client send syn error\n");
-		return -1;
+	/* integrated with time out module */
+
+	printf("client try to connect server, start to send syn\n");
+
+	for (int i = 0; i < 5; i++) {
+		printf("times: %d\n", i);
+		gbnhdr t_hdr;
+		t_hdr.type = SYN;
+		t_hdr.seqnum = s.seq_num;
+		t_hdr.checksum = 0;
+		int t_send_ret;
+		t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, server, socklen);
+		if (t_send_ret < 0) {
+			printf("client send syn error\n");
+			return (-1);
+		}
+		printf("client send syn success, expecting to recv SYNACK\n");
+		gbnhdr tmp;
+		int t_ret;
+		alarm(5);
+		struct sigaction sact = {
+    		.sa_handler = alarmHandler,
+    		.sa_flags = 0,
+		};
+		sigaction(SIGALRM, &sact, NULL);
+		// signal(SIGALRM, alarmHandler);
+		t_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, server, &socklen);
+		if (t_ret < 0) {
+			// printf("errno: %d\n", errno);
+			if (errno == EINTR) {
+				printf("recvfrom time out\n");
+			} else {
+				printf("recvfrom error\n");
+			}
+		} else {
+			alarm(0);
+			s.seq_num += 1;
+			if (tmp.type == SYNACK) {
+				printf("client recv synack success and connection established\n");
+				s.state = ESTABLISHED;
+				return 0;
+			}
+		}
 	}
-	printf("client send syn success, expect SYNACK\n");
-	gbnhdr tmp;
-	int t_ret;
-	t_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, server, &socklen);
-	if (t_ret < 0) {
-		printf("client recv synack error\n");
-	}
-	if (tmp.type == SYNACK) {
-		printf("client recv synack success\n");
-		printf("connection established\n");
-	}
-	return(0);
+	return(-1);
 }
 
-int gbn_listen(int sockfd, int backlog){
+int gbn_listen(int sockfd, int backlog) {
 
-	/* TODO: Your code here. */
 	s.seq_num = 0;
 	return(0);
 }
 
-int gbn_bind(int sockfd, const struct sockaddr *server, socklen_t socklen){
+int gbn_bind(int sockfd, const struct sockaddr *server, socklen_t socklen) {
 
-	/* TODO: Your code here. */
 	return bind(sockfd, server, socklen);
 }	
 
-int gbn_socket(int domain, int type, int protocol){
+int gbn_socket(int domain, int type, int protocol) {
 		
 	/*----- Randomizing the seed. This is used by the rand() function -----*/
 	srand((unsigned)time(0));
 	
-	/* TODO: Your code here. */
 	int sockfd;
 	sockfd = socket(domain, type, protocol);
 	return sockfd;
 }
 
-int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen){
+int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
 
-	/* TODO: Your code here. */
 	gbnhdr t_recv_hdr;
 	int t_recv_ret;
 	t_recv_ret = recvfrom(sockfd, &t_recv_hdr, sizeof(t_recv_hdr), 0, client, socklen);
 	if (t_recv_ret < 0) {
 		printf("server receive syn error\n");
 	}
-	printf("fuck error\n");
+	
 	memcpy(&remote, client, *socklen);
 	rl = *socklen;
 
 	if (t_recv_hdr.type == SYN) {
-		printf("server receive syn success, send back synack\n");
-		gbnhdr t_hdr;
-		t_hdr.type = SYNACK;
-		t_hdr.seqnum = 0;
-		t_hdr.checksum = 0;
-		int t_send_ret;
-		t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, &remote, rl);
-		if (t_send_ret < 0) {
-			printf("server send synack error\n");
-			return (-1);
-		}
-		printf("server send synack success\n");
-		printf("connection established\n");
-		s.state = ESTABLISHED;
-		return 0;
+		// printf("server receive syn success, send back synack\n");
+		// gbnhdr t_hdr;
+		// t_hdr.type = SYNACK;
+		// t_hdr.seqnum = 0;
+		// t_hdr.checksum = 0;
+		// int t_send_ret;
+		// t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, &remote, rl);
+		// if (t_send_ret < 0) {
+		// 	printf("server send synack error\n");
+		// 	return (-1);
+		// }
+		// printf("server send synack success and connection established\n");
+		// s.state = ESTABLISHED;
+		// return 0;
 	}
 	return sockfd;
 }
 
 ssize_t maybe_sendto(int  s, const void *buf, size_t len, int flags, \
-                     const struct sockaddr *to, socklen_t tolen){
+                     const struct sockaddr *to, socklen_t tolen) {
 
 	char *buffer = malloc(len);
 	memcpy(buffer, buf, len);

@@ -73,10 +73,7 @@ int main(int argc, char *argv[])
 		}
 		else if (numRead == 0)
 			break;
-		printf("%s", buf);
 		fwrite(buf, 1, numRead, outputFile);
-		for (int i = 0; i < numRead; i++)
-			printf("%c", buf[i]);
 	}
 
 	/*----- Closing the socket -----*/
