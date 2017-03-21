@@ -4,6 +4,11 @@ state_t s;
 extern struct sockaddr_in remote;
 extern socklen_t rl;
 
+static void alarmHandler(int signo) {
+	printf("timeout\n");
+	return;
+}
+
 uint16_t checksum(uint16_t *buf, int nwords)
 {
 	uint32_t sum;
@@ -20,36 +25,54 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags){
 	int n_seg = ceil(len / (double)DATALEN), send_bytes = 0;
 
 	int i = 0;
-	printf("n_seg: %d\n", n_seg);
+	// printf("n_seg: %d\n", n_seg);
 
 	for (i = 0; i < n_seg; i++) {
-		gbnhdr t_hdr;
-		t_hdr.type = DATA;
-		t_hdr.seqnum = s.seq_num;
-		t_hdr.checksum = 0;
-		t_hdr.datalen = min(len, DATALEN);
-		memcpy(t_hdr.data, buf + i * DATALEN, min(len, DATALEN));
-		//printf("client send data: %s\n", t_hdr.data);
-		int t_sum = checksum((uint16_t *) &t_hdr, sizeof(t_hdr) / 2);
-		t_hdr.checksum = t_sum;
+		int trials;
+		for (trials = 0; trials < 5; trials++) {
+			gbnhdr t_hdr;
+			t_hdr.type = DATA;
+			t_hdr.seqnum = s.seq_num;
+			t_hdr.checksum = 0;
+			t_hdr.datalen = min(len, DATALEN);
+			memcpy(t_hdr.data, buf + i * DATALEN, min(len, DATALEN));
+			//printf("client send data: %s\n", t_hdr.data);
+			int t_sum = checksum((uint16_t *) &t_hdr, sizeof(t_hdr) / 2);
+			t_hdr.checksum = t_sum;
 
-		int t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, (struct sockaddr *) &remote, rl);
-		printf("sender send %d\n", t_send_ret);
-		if (t_send_ret < 0) {
-			return -1;
+			int t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, (struct sockaddr *) &remote, rl);
+			if (t_send_ret < 0) {
+				printf("gbn_send: client send data error\n");
+				return -1;
+			}
+			printf("gbn_send: client send %d bytes data\n", t_send_ret);
+			/* set time out for receiving DATA ACK */
+			alarm(TIMEOUT);
+			struct sigaction sact = {
+    			.sa_handler = alarmHandler,
+    			.sa_flags = 0,
+			};
+			sigaction(SIGALRM, &sact, NULL);
+			gbnhdr tmp;
+			int t_ret;
+			t_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, (struct sockaddr *) &remote, &rl);
+			printf("gbn_send: signal type: %d\n", tmp.type);
+			if (t_ret < 0) {
+				if (errno == EINTR) {
+					printf("gbn_send: recv data ack time out\n");
+				} else {
+					printf("gbn_send: recvfrom data ack error");
+				}
+				// current data is missing, need to retransmit.
+				trials--;
+			} else {
+				alarm(0);
+				s.seq_num++;
+				send_bytes += min(len, DATALEN);
+				len -= DATALEN;
+				break;
+			}
 		}
-		/* set time out for receiving DATA ACK */
-
-		gbnhdr tmp;
-		int t_ret;
-		t_ret = recvfrom(sockfd, &tmp, sizeof(tmp), 0, (struct sockaddr *) &remote, &rl);
-		printf("signal type: %d\n", tmp.type);
-		if (t_ret == -1) {
-			return -1;
-		}
-		s.seq_num++;
-		send_bytes += min(len, DATALEN);
-		len -= DATALEN;
 	}
 	printf("data send success and time to close connection\n");
 	return send_bytes;
@@ -108,11 +131,8 @@ int gbn_close(int sockfd){
 		printf("sender FIN packet sent\n");
 		return(0);
 	}
-}
 
-static void alarmHandler(int signo) {
-	printf("timeout\n");
-	return;
+	return 0;
 }
 
 int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen){
@@ -125,10 +145,10 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen){
 
 	/* integrated with time out module */
 
-	printf("client try to connect server, start to send syn\n");
+	printf("gbn_connect: client try to connect server, start to send syn\n");
 
 	for (int i = 0; i < 5; i++) {
-		printf("times: %d\n", i);
+		printf("gbn_connect: trial times %d\n", i);
 		gbnhdr t_hdr;
 		t_hdr.type = SYN;
 		t_hdr.seqnum = s.seq_num;
@@ -136,13 +156,13 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen){
 		int t_send_ret;
 		t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, server, socklen);
 		if (t_send_ret < 0) {
-			printf("client send syn error\n");
+			printf("gbn_connect: client send syn error\n");
 			return (-1);
 		}
-		printf("client send syn success, expecting to recv SYNACK\n");
+		printf("gbn_connect: client send syn success, expecting to recv SYNACK\n");
 		gbnhdr tmp;
 		int t_ret;
-		alarm(5);
+		alarm(TIMEOUT);
 		struct sigaction sact = {
     		.sa_handler = alarmHandler,
     		.sa_flags = 0,
@@ -153,15 +173,15 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen){
 		if (t_ret < 0) {
 			// printf("errno: %d\n", errno);
 			if (errno == EINTR) {
-				printf("recvfrom time out\n");
+				printf("gbn_connect: recvfrom time out\n");
 			} else {
-				printf("recvfrom error\n");
+				printf("gbn_connect: recvfrom error\n");
 			}
 		} else {
 			alarm(0);
 			s.seq_num += 1;
 			if (tmp.type == SYNACK) {
-				printf("client recv synack success and connection established\n");
+				printf("gbn_connect: client recv synack success and connection established\n");
 				s.state = ESTABLISHED;
 				return 0;
 			}
@@ -197,27 +217,27 @@ int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
 	int t_recv_ret;
 	t_recv_ret = recvfrom(sockfd, &t_recv_hdr, sizeof(t_recv_hdr), 0, client, socklen);
 	if (t_recv_ret < 0) {
-		printf("server receive syn error\n");
+		printf("gbn_accept: server receive syn error\n");
 	}
 	
 	memcpy(&remote, client, *socklen);
 	rl = *socklen;
 
 	if (t_recv_hdr.type == SYN) {
-		// printf("server receive syn success, send back synack\n");
-		// gbnhdr t_hdr;
-		// t_hdr.type = SYNACK;
-		// t_hdr.seqnum = 0;
-		// t_hdr.checksum = 0;
-		// int t_send_ret;
-		// t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, &remote, rl);
-		// if (t_send_ret < 0) {
-		// 	printf("server send synack error\n");
-		// 	return (-1);
-		// }
-		// printf("server send synack success and connection established\n");
-		// s.state = ESTABLISHED;
-		// return 0;
+		printf("gbn_accept: server receive syn success, send back synack\n");
+		gbnhdr t_hdr;
+		t_hdr.type = SYNACK;
+		t_hdr.seqnum = 0;
+		t_hdr.checksum = 0;
+		int t_send_ret;
+		t_send_ret = sendto(sockfd, &t_hdr, sizeof(t_hdr), 0, &remote, rl);
+		if (t_send_ret < 0) {
+			printf("gbn_accept: server send synack error\n");
+			return (-1);
+		}
+		printf("gbn_accept: server send synack success and connection established\n");
+		s.state = ESTABLISHED;
+		return 0;
 	}
 	return sockfd;
 }
